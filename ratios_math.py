@@ -1,8 +1,9 @@
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox
 import math
 import csv
 import re
+import os  # Added to check for file existence
 
 def parse_inch_string(s):
     if not s: return 0.0
@@ -43,31 +44,34 @@ class ParallelSpringApp:
         self.spring_data = []
         
         # --- Variables ---
-        self.var_r_ext = tk.DoubleVar(value=10.0)
-        self.var_R_large = tk.DoubleVar(value=40.0)
+        self.var_r_ext = tk.DoubleVar(value=5.0)
+        self.var_R_large = tk.DoubleVar(value=25.0)
         self.var_r_spring = tk.DoubleVar(value=5.0)
         
         # --- UI Layout ---
         control_frame = ttk.Frame(root, padding=20)
         control_frame.pack(side=tk.TOP, fill=tk.X)
 
-        self.create_slider(control_frame, "Driven Shaft Radius (r_ext) [mm]", self.var_r_ext, 2.1, 50)
-        self.create_slider(control_frame, "Large Wheel Radius (R_large) [mm]", self.var_R_large, 5, 150)
-        self.create_slider(control_frame, "Wheel Shaft Radius (r_spring) [mm]", self.var_r_spring, 1, 30)
+        self.create_slider(control_frame, "Driven Shaft Radius (r_ext) [mm]", self.var_r_ext, 1, 10)
+        self.create_slider(control_frame, "Large Wheel Radius (R_large) [mm]", self.var_R_large, 0, 50)
+        self.create_slider(control_frame, "Wheel Shaft Radius (r_spring) [mm]", self.var_r_spring, 1, 10)
         
         ttk.Separator(control_frame, orient="horizontal").pack(fill="x", pady=10)
         
         self.lbl_results = ttk.Label(control_frame, font=("Arial", 11, "bold"), justify="center", foreground="#b71c1c")
         self.lbl_results.pack()
         
-        btn_load = ttk.Button(control_frame, text="Load Spring CSV", command=self.load_csv)
+        # Status label to show which file is loaded
+        self.lbl_status = ttk.Label(control_frame, text="No file loaded", font=("Arial", 9, "italic"))
+        self.lbl_status.pack(pady=2)
+
+        btn_load = ttk.Button(control_frame, text="Manually Load Spring CSV", command=self.manual_load_csv)
         btn_load.pack(pady=5)
 
         # --- Table ---
         table_frame = ttk.Frame(root, padding=10)
         table_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
-        # Added columns for Quantity and Total System Force
         cols = ("PartNum", "Qty Needed", "Single End Force", "Total Sys Force", "Max Deflect", "Total Price")
         self.tree = ttk.Treeview(table_frame, columns=cols, show="headings")
         for col in cols:
@@ -83,31 +87,54 @@ class ParallelSpringApp:
         for var in [self.var_r_ext, self.var_R_large, self.var_r_spring]:
             var.trace_add("write", self.calculate)
 
+        # --- AUTO LOAD LOGIC ---
+        self.auto_load_default_file()
+
     def create_slider(self, parent, label, var, start, end):
         frame = ttk.Frame(parent)
         frame.pack(fill="x", pady=2)
         ttk.Label(frame, text=label, width=35).pack(side=tk.LEFT)
-        ttk.Scale(frame, from_=start, to=end, variable=var, orient=tk.HORIZONTAL, command=self.calculate).pack(side=tk.LEFT, fill="x", expand=True)
+        slider = ttk.Scale(frame, from_=start, to=end, variable=var, orient=tk.HORIZONTAL, 
+                           command=lambda s: var.set(round(float(s))))
+        slider.pack(side=tk.LEFT, fill="x", expand=True)
         ttk.Label(frame, textvariable=var, width=8).pack(side=tk.RIGHT)
 
-    def load_csv(self):
+    def auto_load_default_file(self):
+        """Looks for 'springs.csv' in the current directory and loads it if found."""
+        default_filename = "springs.csv"
+        if os.path.exists(default_filename):
+            self.process_csv(default_filename)
+            self.lbl_status.config(text=f"Automatically loaded: {default_filename}")
+        else:
+            self.lbl_status.config(text=f"Ready ('{default_filename}' not found for auto-load)")
+
+    def manual_load_csv(self):
         file_path = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
-        if not file_path: return
-        
+        if file_path:
+            self.process_csv(file_path)
+            self.lbl_status.config(text=f"Loaded: {os.path.basename(file_path)}")
+
+    def process_csv(self, file_path):
+        """Shared logic for reading and parsing the spring database."""
         self.spring_data = []
         try:
             with open(file_path, newline='', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    lg = parse_inch_string(row['Length'])
-                    ext_lg = parse_inch_string(row['Extended Lg @ Max Load'])
-                    max_f_lb = float(row['Max.'] if 'Max.' in row else row['Max Load (lb)']) 
-                    rate_lb_in = parse_rate_string(row['Spring Rate'])
-                    price = parse_price(row['Price'])
-                    pkg_qty = float(row['Pkg Qty'] if 'Pkg Qty' in row else 1)
+                    # Robust field detection
+                    lg = parse_inch_string(row.get('Length', '0'))
+                    ext_lg = parse_inch_string(row.get('Extended Lg @ Max Load', '0'))
+                    
+                    # Handle different naming conventions for force/rate
+                    max_f_str = row.get('Max Load (lb)', row.get('Max.', '0'))
+                    max_f_lb = float(max_f_str) if max_f_str else 0.0
+                    
+                    rate_lb_in = parse_rate_string(row.get('Spring Rate', '0'))
+                    price = parse_price(row.get('Price', '0'))
+                    pkg_qty = float(row.get('Pkg Qty', 1))
                     
                     self.spring_data.append({
-                        'part': row['Part Number'],
+                        'part': row.get('Part Number', 'Unknown'),
                         'max_f_n': max_f_lb * 4.44822,
                         'rate_n_mm': rate_lb_in * 0.175126,
                         'max_def_mm': (ext_lg - lg) * 25.4,
@@ -116,7 +143,7 @@ class ParallelSpringApp:
                     })
             self.calculate()
         except Exception as e:
-            print(f"Error loading CSV: {e}")
+            messagebox.showerror("Error", f"Could not parse CSV: {e}")
 
     def calculate(self, *args):
         try:
@@ -129,6 +156,12 @@ class ParallelSpringApp:
             R_large = self.var_R_large.get()
             r_spring = self.var_r_spring.get()
             
+            if R_large <= 0 or r_ext <= 0 or r_spring <= 0:
+                self.lbl_results.config(text="TARGET: Invalid Radii (Must be > 0)")
+                for item in self.tree.get_children():
+                    self.tree.delete(item)
+                return
+
             theta1 = L_rope / r_int
             theta2 = theta1 * (r_ext / R_large)
             
@@ -141,20 +174,14 @@ class ParallelSpringApp:
                 self.tree.delete(item)
                 
             for s in self.spring_data:
-                # 1. Travel Check (Physical limit)
                 if s['max_def_mm'] < req_travel_mm:
                     continue
                 
-                # 2. Force at the weakest point (fully retracted) for ONE spring
                 f_retracted_single = s['max_f_n'] - (s['rate_n_mm'] * req_travel_mm)
-                
                 if f_retracted_single <= 0:
-                    continue # Spring goes slack, parallel won't help
+                    continue 
                 
-                # 3. How many springs in parallel to reach req_force_n?
                 qty_needed = math.ceil(req_force_n / f_retracted_single)
-                
-                # Limit to 10 springs for sanity
                 if qty_needed > 10:
                     continue
                 
