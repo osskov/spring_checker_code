@@ -39,7 +39,7 @@ class ParallelSpringApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Retraction Designer: Parallel Spring Optimizer")
-        self.root.geometry("1150x850") # Slightly wider for new column
+        self.root.geometry("1000x850")
         
         self.spring_data = []
         
@@ -71,13 +71,12 @@ class ParallelSpringApp:
         table_frame = ttk.Frame(root, padding=10)
         table_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
-        # Added "Net Rate" column to display the sorting criteria
-        cols = ("PartNum", "Qty Needed", "Net Spring Rate", "Single End Force", "Total Sys Force", "Max Deflect", "Total Price")
+        # Updated Columns: Net Rate, Min Operating Length, Total Price
+        cols = ("PartNum", "Qty Needed", "Net Rate (N/mm)", "Min Length (Retracted)", "Total Price")
         self.tree = ttk.Treeview(table_frame, columns=cols, show="headings")
         for col in cols:
             self.tree.heading(col, text=col)
-            # Make Net Rate column stand out slightly
-            self.tree.column(col, width=130, anchor="center")
+            self.tree.column(col, width=150, anchor="center")
         
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
@@ -95,7 +94,7 @@ class ParallelSpringApp:
         frame.pack(fill="x", pady=2)
         ttk.Label(frame, text=label, width=35).pack(side=tk.LEFT)
         slider = ttk.Scale(frame, from_=start, to=end, variable=var, orient=tk.HORIZONTAL, 
-                           command=lambda s: var.set(round(float(s))))
+                           command=lambda s: var.set(round(float(s) * 2) / 2))
         slider.pack(side=tk.LEFT, fill="x", expand=True)
         ttk.Label(frame, textvariable=var, width=8).pack(side=tk.RIGHT)
 
@@ -119,20 +118,21 @@ class ParallelSpringApp:
             with open(file_path, newline='', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    lg = parse_inch_string(row.get('Length', '0'))
-                    ext_lg = parse_inch_string(row.get('Extended Lg @ Max Load', '0'))
+                    lg_in = parse_inch_string(row.get('Length', '0'))
+                    ext_lg_in = parse_inch_string(row.get('Extended Lg @ Max Load', '0'))
                     max_f_str = row.get('Max Load (lb)', row.get('Max.', '0'))
                     max_f_lb = float(max_f_str) if max_f_str else 0.0
                     rate_lb_in = parse_rate_string(row.get('Spring Rate', '0'))
-                    price = parse_price(row.get('Price', '0'))
+                    price_pkg = parse_price(row.get('Price', '0'))
                     pkg_qty = float(row.get('Pkg Qty', 1))
                     
                     self.spring_data.append({
                         'part': row.get('Part Number', 'Unknown'),
+                        'free_len_mm': lg_in * 25.4,
                         'max_f_n': max_f_lb * 4.44822,
                         'rate_n_mm': rate_lb_in * 0.175126,
-                        'max_def_mm': (ext_lg - lg) * 25.4,
-                        'unit_price': price / pkg_qty,
+                        'max_def_mm': (ext_lg_in - lg_in) * 25.4,
+                        'pkg_price': price_pkg,
                         'pkg_qty': pkg_qty
                     })
             self.calculate()
@@ -141,7 +141,7 @@ class ParallelSpringApp:
 
     def calculate(self, *args):
         try:
-            # Requirements
+            # Mechanical Constant Assumptions
             L_rope = 600.0  
             r_int = 2.0     
             T_req_Nmm = 6.0 
@@ -151,65 +151,76 @@ class ParallelSpringApp:
             r_spring = self.var_r_spring.get()
             
             if R_large <= 0 or r_ext <= 0 or r_spring <= 0:
-                self.lbl_results.config(text="TARGET: Invalid Radii (Must be > 0)")
+                self.lbl_results.config(text="TARGET: Invalid Radii")
                 for item in self.tree.get_children(): self.tree.delete(item)
                 return
 
+            # Geometry logic
             theta1 = L_rope / r_int
             theta2 = theta1 * (r_ext / R_large)
             req_travel_mm = theta2 * r_spring
-            req_force_n = (T_req_Nmm * R_large) / (r_ext * r_spring)
+            req_force_n_total = (T_req_Nmm * R_large) / (r_ext * r_spring)
             
-            self.lbl_results.config(text=f"TARGET: {req_force_n:.3f} N Force at {req_travel_mm:.1f} mm Extension")
+            self.lbl_results.config(text=f"TARGET: {req_force_n_total:.3f} N Force at {req_travel_mm:.1f} mm Extension")
             
-            # Temporary list to store valid configurations for sorting
             valid_configs = []
                 
             for s in self.spring_data:
+                # 1. Check if spring can even handle the stroke (Travel Check)
                 if s['max_def_mm'] < req_travel_mm:
                     continue
                 
-                f_retracted_single = s['max_f_n'] - (s['rate_n_mm'] * req_travel_mm)
-                if f_retracted_single <= 0:
-                    continue 
+                # 2. Find force at max usable retraction for 1 spring
+                # Initial Tension (approximate) = Max Load - (Rate * Max Deflection)
+                it_n = s['max_f_n'] - (s['rate_n_mm'] * s['max_def_mm'])
                 
-                qty_needed = math.ceil(req_force_n / f_retracted_single)
+                # The spring is strongest when fully extended. At the retracted state (min length), 
+                # we must have enough headroom to travel 'req_travel_mm' without exceeding max_def_mm.
+                # Therefore, the maximum force we can have at the retracted state is:
+                f_max_at_retracted = s['max_f_n'] - (s['rate_n_mm'] * req_travel_mm)
+                
+                if f_max_at_retracted <= 0:
+                    continue # Spring too weak or goes slack during stroke
+                
+                # 3. Determine Qty
+                qty_needed = math.ceil(req_force_n_total / f_max_at_retracted)
                 if qty_needed > 10:
                     continue
                 
-                # Calculation of Net Spring Rate (Total K)
-                net_spring_rate = qty_needed * s['rate_n_mm']
+                # 4. Calculate Minimum Length to hit necessary force
+                # We need req_force_n_total / qty_needed per spring at retracted state.
+                f_target_per_spring = req_force_n_total / qty_needed
                 
-                total_sys_force = qty_needed * f_retracted_single
-                total_cost = qty_needed * s['unit_price']
+                # Pre-load extension required = (Force - Initial Tension) / Rate
+                # If force is less than initial tension, x is 0 (it hits the force instantly).
+                x_preload = max(0.0, (f_target_per_spring - it_n) / s['rate_n_mm'])
+                
+                # The minimum length required is the Free Length + Pre-load
+                min_oper_length_mm = s['free_len_mm'] + x_preload
+                
+                # 5. Total Price Calculation (Purchase price of packages)
+                num_packages = math.ceil(qty_needed / s['pkg_qty'])
+                total_purchase_price = num_packages * s['pkg_price']
 
-                # Store result in a dictionary for easy sorting
                 valid_configs.append({
                     'part': s['part'],
                     'qty': qty_needed,
-                    'net_rate': net_spring_rate,
-                    'single_f': f_retracted_single,
-                    'total_f': total_sys_force,
-                    'max_def': s['max_def_mm'],
-                    'cost': total_cost
+                    'net_rate': qty_needed * s['rate_n_mm'],
+                    'min_len': min_oper_length_mm,
+                    'cost': total_purchase_price
                 })
             
-            # --- SORTING LOGIC ---
-            # Sort the list by net_rate in increasing order
+            # Sort by Net Rate (stiffness)
             valid_configs.sort(key=lambda x: x['net_rate'])
 
-            # Clear and Re-populate the table
-            for item in self.tree.get_children():
-                self.tree.delete(item)
+            for item in self.tree.get_children(): self.tree.delete(item)
 
             for config in valid_configs:
                 self.tree.insert("", tk.END, values=(
                     config['part'],
                     f"{config['qty']}x",
-                    f"{config['net_rate']:.3f} N/mm", # Display net rate
-                    f"{config['single_f']:.2f} N",
-                    f"{config['total_f']:.2f} N",
-                    f"{config['max_def']:.1f} mm",
+                    f"{config['net_rate']:.3f} N/mm",
+                    f"{config['min_len']:.2f} mm",
                     f"${config['cost']:.2f}"
                 ))
                     
