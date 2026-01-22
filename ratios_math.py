@@ -3,7 +3,7 @@ from tkinter import ttk, filedialog, messagebox
 import math
 import csv
 import re
-import os  # Added to check for file existence
+import os
 
 def parse_inch_string(s):
     if not s: return 0.0
@@ -39,14 +39,14 @@ class ParallelSpringApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Retraction Designer: Parallel Spring Optimizer")
-        self.root.geometry("1100x850")
+        self.root.geometry("1150x850") # Slightly wider for new column
         
         self.spring_data = []
         
         # --- Variables ---
-        self.var_r_ext = tk.DoubleVar(value=5.0)
+        self.var_r_ext = tk.DoubleVar(value=2.0)
         self.var_R_large = tk.DoubleVar(value=25.0)
-        self.var_r_spring = tk.DoubleVar(value=5.0)
+        self.var_r_spring = tk.DoubleVar(value=2.0)
         
         # --- UI Layout ---
         control_frame = ttk.Frame(root, padding=20)
@@ -61,7 +61,6 @@ class ParallelSpringApp:
         self.lbl_results = ttk.Label(control_frame, font=("Arial", 11, "bold"), justify="center", foreground="#b71c1c")
         self.lbl_results.pack()
         
-        # Status label to show which file is loaded
         self.lbl_status = ttk.Label(control_frame, text="No file loaded", font=("Arial", 9, "italic"))
         self.lbl_status.pack(pady=2)
 
@@ -72,11 +71,13 @@ class ParallelSpringApp:
         table_frame = ttk.Frame(root, padding=10)
         table_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
-        cols = ("PartNum", "Qty Needed", "Single End Force", "Total Sys Force", "Max Deflect", "Total Price")
+        # Added "Net Rate" column to display the sorting criteria
+        cols = ("PartNum", "Qty Needed", "Net Spring Rate", "Single End Force", "Total Sys Force", "Max Deflect", "Total Price")
         self.tree = ttk.Treeview(table_frame, columns=cols, show="headings")
         for col in cols:
             self.tree.heading(col, text=col)
-            self.tree.column(col, width=120, anchor="center")
+            # Make Net Rate column stand out slightly
+            self.tree.column(col, width=130, anchor="center")
         
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
@@ -87,7 +88,6 @@ class ParallelSpringApp:
         for var in [self.var_r_ext, self.var_R_large, self.var_r_spring]:
             var.trace_add("write", self.calculate)
 
-        # --- AUTO LOAD LOGIC ---
         self.auto_load_default_file()
 
     def create_slider(self, parent, label, var, start, end):
@@ -100,13 +100,12 @@ class ParallelSpringApp:
         ttk.Label(frame, textvariable=var, width=8).pack(side=tk.RIGHT)
 
     def auto_load_default_file(self):
-        """Looks for 'springs.csv' in the current directory and loads it if found."""
         default_filename = "springs.csv"
         if os.path.exists(default_filename):
             self.process_csv(default_filename)
             self.lbl_status.config(text=f"Automatically loaded: {default_filename}")
         else:
-            self.lbl_status.config(text=f"Ready ('{default_filename}' not found for auto-load)")
+            self.lbl_status.config(text=f"Ready ('{default_filename}' not found)")
 
     def manual_load_csv(self):
         file_path = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
@@ -115,20 +114,15 @@ class ParallelSpringApp:
             self.lbl_status.config(text=f"Loaded: {os.path.basename(file_path)}")
 
     def process_csv(self, file_path):
-        """Shared logic for reading and parsing the spring database."""
         self.spring_data = []
         try:
             with open(file_path, newline='', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    # Robust field detection
                     lg = parse_inch_string(row.get('Length', '0'))
                     ext_lg = parse_inch_string(row.get('Extended Lg @ Max Load', '0'))
-                    
-                    # Handle different naming conventions for force/rate
                     max_f_str = row.get('Max Load (lb)', row.get('Max.', '0'))
                     max_f_lb = float(max_f_str) if max_f_str else 0.0
-                    
                     rate_lb_in = parse_rate_string(row.get('Spring Rate', '0'))
                     price = parse_price(row.get('Price', '0'))
                     pkg_qty = float(row.get('Pkg Qty', 1))
@@ -158,20 +152,18 @@ class ParallelSpringApp:
             
             if R_large <= 0 or r_ext <= 0 or r_spring <= 0:
                 self.lbl_results.config(text="TARGET: Invalid Radii (Must be > 0)")
-                for item in self.tree.get_children():
-                    self.tree.delete(item)
+                for item in self.tree.get_children(): self.tree.delete(item)
                 return
 
             theta1 = L_rope / r_int
             theta2 = theta1 * (r_ext / R_large)
-            
             req_travel_mm = theta2 * r_spring
             req_force_n = (T_req_Nmm * R_large) / (r_ext * r_spring)
             
             self.lbl_results.config(text=f"TARGET: {req_force_n:.3f} N Force at {req_travel_mm:.1f} mm Extension")
             
-            for item in self.tree.get_children():
-                self.tree.delete(item)
+            # Temporary list to store valid configurations for sorting
+            valid_configs = []
                 
             for s in self.spring_data:
                 if s['max_def_mm'] < req_travel_mm:
@@ -185,16 +177,40 @@ class ParallelSpringApp:
                 if qty_needed > 10:
                     continue
                 
+                # Calculation of Net Spring Rate (Total K)
+                net_spring_rate = qty_needed * s['rate_n_mm']
+                
                 total_sys_force = qty_needed * f_retracted_single
                 total_cost = qty_needed * s['unit_price']
 
+                # Store result in a dictionary for easy sorting
+                valid_configs.append({
+                    'part': s['part'],
+                    'qty': qty_needed,
+                    'net_rate': net_spring_rate,
+                    'single_f': f_retracted_single,
+                    'total_f': total_sys_force,
+                    'max_def': s['max_def_mm'],
+                    'cost': total_cost
+                })
+            
+            # --- SORTING LOGIC ---
+            # Sort the list by net_rate in increasing order
+            valid_configs.sort(key=lambda x: x['net_rate'])
+
+            # Clear and Re-populate the table
+            for item in self.tree.get_children():
+                self.tree.delete(item)
+
+            for config in valid_configs:
                 self.tree.insert("", tk.END, values=(
-                    s['part'],
-                    f"{qty_needed}x",
-                    f"{f_retracted_single:.2f} N",
-                    f"{total_sys_force:.2f} N",
-                    f"{s['max_def_mm']:.1f} mm",
-                    f"${total_cost:.2f}"
+                    config['part'],
+                    f"{config['qty']}x",
+                    f"{config['net_rate']:.3f} N/mm", # Display net rate
+                    f"{config['single_f']:.2f} N",
+                    f"{config['total_f']:.2f} N",
+                    f"{config['max_def']:.1f} mm",
+                    f"${config['cost']:.2f}"
                 ))
                     
         except Exception:
